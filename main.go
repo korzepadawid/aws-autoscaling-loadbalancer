@@ -53,7 +53,12 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	_, err = CreateLaunchTemplate(ctx, logger, ec2Client, securityGroupID)
+	launchTemplateID, err := CreateLaunchTemplate(ctx, logger, ec2Client, securityGroupID)
+	if err != nil {
+		logger.Fatal(err)
+	}
+
+	_, err = CreateEC2Instances(ctx, logger, ec2Client, launchTemplateID)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -168,6 +173,7 @@ func CreateEC2Instances(ctx context.Context, logger *log.Logger, ec2Client *ec2.
 	if err != nil {
 		return nil, fmt.Errorf("error waiting for instances to be running: %w", err)
 	}
+	logger.Println("All instances are running")
 
 	return result.Instances, nil
 }
