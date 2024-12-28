@@ -119,10 +119,10 @@ func CreateSecurityGroup(ctx context.Context, logger *log.Logger, ec2Client *ec2
 	return *createOutput.GroupId, nil
 }
 
-func CreateLaunchTemplate(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, securityGroupID string) (*ec2.CreateLaunchTemplateOutput, error) {
+func CreateLaunchTemplate(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, securityGroupID string) (string, error) {
 	userDataBytes, err := os.ReadFile(USER_DATA_SCRIPT)
 	if err != nil {
-		logger.Fatalf("error reading user_data.sh file: %v", err)
+		return "", fmt.Errorf("error reading user_data.sh file: %w", err)
 	}
 	logger.Println("user_data.sh file read successfully")
 
@@ -139,11 +139,11 @@ func CreateLaunchTemplate(ctx context.Context, logger *log.Logger, ec2Client *ec
 		LaunchTemplateName: aws.String(AWS_LAUNCH_TEMPLATE_PREFIX + uuid.NewString()),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("error creating launch template: %w", err)
+		return "", fmt.Errorf("error creating launch template: %w", err)
 	}
 	logger.Printf("Launch template created with ID: %s", *ec2LaunchTemplate.LaunchTemplate.LaunchTemplateId)
 
-	return ec2LaunchTemplate, nil
+	return *ec2LaunchTemplate.LaunchTemplate.LaunchTemplateId, nil
 }
 
 func CreateEC2Instances(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, launchTemplateID string) ([]types.Instance, error) {
