@@ -48,6 +48,11 @@ func main() {
 		logger.Fatal(err)
 	}
 
+	subnetID, err := CreateSubnet(ctx, logger, ec2Client, vpcID)
+	if err != nil {
+		logger.Fatal(err)
+	}
+
 	securityGroupID, err := CreateSecurityGroup(ctx, logger, ec2Client, vpcID)
 	if err != nil {
 		logger.Fatal(err)
@@ -58,7 +63,7 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	_, err = CreateEC2Instances(ctx, logger, ec2Client, launchTemplateID)
+	_, err = CreateEC2Instances(ctx, logger, ec2Client, launchTemplateID, subnetID)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -85,6 +90,20 @@ func CreateVPC(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client) (
 	logger.Printf("DNS hostnames enabled for VPC with ID: %s", *result.Vpc.VpcId)
 
 	return *result.Vpc.VpcId, nil
+}
+
+func CreateSubnet(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, vpcID string) (string, error) {
+	subnetResult, err := ec2Client.CreateSubnet(ctx, &ec2.CreateSubnetInput{
+		VpcId:            aws.String(vpcID),
+		CidrBlock:        aws.String("10.0.1.0/24"),
+		AvailabilityZone: aws.String(AWS_REGION),
+	})
+	if err != nil {
+		return "", fmt.Errorf("error creating subnet: %w", err)
+	}
+	logger.Printf("Subnet created with ID: %s", *subnetResult.Subnet.SubnetId)
+
+	return *subnetResult.Subnet.SubnetId, nil
 }
 
 func CreateSecurityGroup(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, vpcID string) (string, error) {
@@ -151,7 +170,7 @@ func CreateLaunchTemplate(ctx context.Context, logger *log.Logger, ec2Client *ec
 	return *ec2LaunchTemplate.LaunchTemplate.LaunchTemplateId, nil
 }
 
-func CreateEC2Instances(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, launchTemplateID string) ([]types.Instance, error) {
+func CreateEC2Instances(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, launchTemplateID string, subnetID string) ([]types.Instance, error) {
 	input := &ec2.RunInstancesInput{
 		LaunchTemplate: &types.LaunchTemplateSpecification{
 			LaunchTemplateId: aws.String(launchTemplateID),
@@ -159,6 +178,7 @@ func CreateEC2Instances(ctx context.Context, logger *log.Logger, ec2Client *ec2.
 		},
 		MinCount: aws.Int32(AWS_DEFAULT_EC2_COUNT),
 		MaxCount: aws.Int32(AWS_DEFAULT_EC2_COUNT),
+		SubnetId: aws.String(subnetID),
 	}
 	result, err := ec2Client.RunInstances(ctx, input)
 	if err != nil {
