@@ -94,9 +94,8 @@ func CreateVPC(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client) (
 
 func CreateSubnet(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, vpcID string) (string, error) {
 	subnetResult, err := ec2Client.CreateSubnet(ctx, &ec2.CreateSubnetInput{
-		VpcId:            aws.String(vpcID),
-		CidrBlock:        aws.String("10.0.1.0/24"),
-		AvailabilityZone: aws.String(AWS_REGION),
+		VpcId:     aws.String(vpcID),
+		CidrBlock: aws.String("10.0.1.0/24"),
 	})
 	if err != nil {
 		return "", fmt.Errorf("error creating subnet: %w", err)
@@ -186,13 +185,14 @@ func CreateEC2Instances(ctx context.Context, logger *log.Logger, ec2Client *ec2.
 	}
 
 	for _, instance := range result.Instances {
-		logger.Printf("Launched instance with ID: %s, IP address: %s, DNS name: %s", *instance.InstanceId, *instance.PublicIpAddress, *instance.PublicDnsName)
+		logger.Printf("Launched instance with ID: %s", *instance.InstanceId)
 	}
 
 	err = WaitForInstances(ctx, ec2Client, logger, result.Instances)
 	if err != nil {
 		return nil, fmt.Errorf("error waiting for instances to be running: %w", err)
 	}
+
 	logger.Println("All instances are running")
 
 	return result.Instances, nil
