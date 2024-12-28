@@ -95,7 +95,7 @@ func CreateSecurityGroup(ctx context.Context, logger *log.Logger, ec2Client *ec2
 	}
 	logger.Printf("Created security group with ID: %s", *createOutput.GroupId)
 
-	_, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
+	ec2IngressInput := &ec2.AuthorizeSecurityGroupIngressInput{
 		GroupId: createOutput.GroupId,
 		IpPermissions: []types.IpPermission{
 			{
@@ -109,8 +109,8 @@ func CreateSecurityGroup(ctx context.Context, logger *log.Logger, ec2Client *ec2
 				},
 			},
 		},
-	})
-	if err != nil {
+	}
+	if _, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, ec2IngressInput); err != nil {
 		return "", fmt.Errorf("error adding inbound (ingress) rule for port 8080: %w", err)
 	}
 	logger.Printf("Added inbound (ingress) rule for port 8080 to security group with ID: %s", *createOutput.GroupId)
