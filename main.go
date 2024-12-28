@@ -23,6 +23,7 @@ const (
 	AWS_REGION                 = "us-east-1"
 	AWS_AMI_ID                 = "ami-01816d07b1128cd2d" // Amazon Linux 2023 AMI
 	AWS_LAUNCH_TEMPLATE_PREFIX = "webservice-launch-template-"
+	AWS_DEFAULT_EC2_COUNT      = 2
 )
 
 func main() {
@@ -32,7 +33,7 @@ func main() {
 	}
 	logger.Println("Environment variables loaded successfully")
 
-	ctx, cancelFunc := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancelFunc()
 
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithDefaultRegion(AWS_REGION))
@@ -143,4 +144,49 @@ func CreateLaunchTemplate(ctx context.Context, logger *log.Logger, ec2Client *ec
 	logger.Printf("Launch template created with ID: %s", *ec2LaunchTemplate.LaunchTemplate.LaunchTemplateId)
 
 	return ec2LaunchTemplate, nil
+}
+
+func CreateEC2Instances(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, launchTemplateID string) ([]types.Instance, error) {
+	input := &ec2.RunInstancesInput{
+		LaunchTemplate: &types.LaunchTemplateSpecification{
+			LaunchTemplateId: aws.String(launchTemplateID),
+			Version:          aws.String("$Latest"),
+		},
+		MinCount: aws.Int32(AWS_DEFAULT_EC2_COUNT),
+		MaxCount: aws.Int32(AWS_DEFAULT_EC2_COUNT),
+	}
+	result, err := ec2Client.RunInstances(ctx, input)
+	if err != nil {
+		log.Fatalf("Unable to launch instance, %v", err)
+	}
+
+	for _, instance := range result.Instances {
+		logger.Printf("Launched instance with ID: %s, IP address: %s, DNS name: %s", *instance.InstanceId, *instance.PublicIpAddress, *instance.PublicDnsName)
+	}
+
+	err = WaitForInstances(ctx, ec2Client, logger, result.Instances)
+	if err != nil {
+		return nil, fmt.Errorf("error waiting for instances to be running: %w", err)
+	}
+
+	return result.Instances, nil
+}
+
+func WaitForInstances(ctx context.Context, client *ec2.Client, logger *log.Logger, instances []types.Instance) error {
+	instanceIDs := make([]string, len(instances))
+	for i, instance := range instances {
+		instanceIDs[i] = *instance.InstanceId
+	}
+
+	input := &ec2.DescribeInstancesInput{
+		InstanceIds: instanceIDs,
+	}
+
+	waiter := ec2.NewInstanceRunningWaiter(client, func(irwo *ec2.InstanceRunningWaiterOptions) {
+		irwo.LogWaitAttempts = true
+	})
+
+	logger.Println("Waiting for instances to be running...")
+	logger.Println("This may take a few minutes...")
+	return waiter.Wait(ctx, input, 5*time.Minute)
 }
