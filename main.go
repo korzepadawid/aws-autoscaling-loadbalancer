@@ -102,6 +102,14 @@ func CreateSubnet(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client
 	}
 	logger.Printf("Subnet created with ID: %s", *subnetResult.Subnet.SubnetId)
 
+	if _, err = ec2Client.ModifySubnetAttribute(ctx, &ec2.ModifySubnetAttributeInput{
+		SubnetId:            subnetResult.Subnet.SubnetId,
+		MapPublicIpOnLaunch: &types.AttributeBooleanValue{Value: aws.Bool(true)},
+	}); err != nil {
+		return "", fmt.Errorf("error enabling auto-assign public IPv4: %w", err)
+	}
+	logger.Printf("Enabled auto-assign public IPv4 for subnet: %s", *subnetResult.Subnet.SubnetId)
+
 	return *subnetResult.Subnet.SubnetId, nil
 }
 
