@@ -11,6 +11,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
+	elbTypes "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -42,6 +45,7 @@ func main() {
 	}
 	logger.Println("AWS configuration loaded successfully")
 	ec2Client := ec2.NewFromConfig(cfg)
+	elbClient := elasticloadbalancingv2.NewFromConfig(cfg)
 
 	vpcID, err := CreateVPC(ctx, logger, ec2Client)
 	if err != nil {
@@ -63,8 +67,26 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	_, err = CreateEC2Instances(ctx, logger, ec2Client, launchTemplateID, subnetID)
+	ec2Instances, err := CreateEC2Instances(ctx, logger, ec2Client, launchTemplateID, subnetID)
 	if err != nil {
+		logger.Fatal(err)
+	}
+
+	_, err = CreateLoadBalancer(ctx, logger, elbClient, subnetID, securityGroupID)
+	if err != nil {
+		logger.Fatal(err)
+	}
+
+	targetGroupARN, err := CreateTargetGroup(ctx, logger, elbClient, vpcID)
+	if err != nil {
+		logger.Fatal(err)
+	}
+
+	if err = RegisterTargets(ctx, logger, elbClient, targetGroupARN, ec2Instances); err != nil {
+		logger.Fatal(err)
+	}
+
+	if err = CreateListener(ctx, logger, elbClient, targetGroupARN, vpcID); err != nil {
 		logger.Fatal(err)
 	}
 }
@@ -223,4 +245,93 @@ func WaitForInstances(ctx context.Context, client *ec2.Client, logger *log.Logge
 	logger.Println("Waiting for instances to be running...")
 	logger.Println("This may take a few minutes...")
 	return waiter.Wait(ctx, input, 5*time.Minute)
+}
+
+func CreateLoadBalancer(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, subnetID string, securityGroupID string) (string, error) {
+	input := &elasticloadbalancingv2.CreateLoadBalancerInput{
+		Name:           aws.String("webservice-load-balancer"),
+		Scheme:         elbTypes.LoadBalancerSchemeEnumInternetFacing,
+		Subnets:        []string{subnetID},
+		SecurityGroups: []string{securityGroupID},
+		IpAddressType:  elbTypes.IpAddressTypeIpv4,
+		Type:           elbTypes.LoadBalancerTypeEnumApplication,
+	}
+
+	output, err := elbClient.CreateLoadBalancer(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("error creating load balancer: %w", err)
+	}
+
+	lbARN := *output.LoadBalancers[0].LoadBalancerArn
+	logger.Printf("Load balancer created with ARN: %s", lbARN)
+
+	return lbARN, nil
+}
+
+func CreateTargetGroup(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, vpcID string) (string, error) {
+	input := &elasticloadbalancingv2.CreateTargetGroupInput{
+		Name:       aws.String("webservice-target-group"),
+		Protocol:   elbTypes.ProtocolEnumHttp,
+		Port:       aws.Int32(8080),
+		VpcId:      aws.String(vpcID),
+		TargetType: elbTypes.TargetTypeEnumInstance,
+	}
+
+	output, err := elbClient.CreateTargetGroup(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("error creating target group: %w", err)
+	}
+
+	tgARN := *output.TargetGroups[0].TargetGroupArn
+	logger.Printf("Target group created with ARN: %s", tgARN)
+
+	return tgARN, nil
+}
+
+func RegisterTargets(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, targetGroupARN string, instances []types.Instance) error {
+	targets := make([]elbTypes.TargetDescription, len(instances))
+	for i, instance := range instances {
+		targets[i] = elbTypes.TargetDescription{
+			Id: instance.InstanceId,
+		}
+	}
+
+	input := &elasticloadbalancingv2.RegisterTargetsInput{
+		TargetGroupArn: aws.String(targetGroupARN),
+		Targets:        targets,
+	}
+
+	if _, err := elbClient.RegisterTargets(ctx, input); err != nil {
+		return fmt.Errorf("error registering targets: %w", err)
+	}
+
+	logger.Println("Targets registered successfully")
+	return nil
+}
+
+func CreateListener(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, loadBalancerARN, targetGroupARN string) error {
+	input := &elasticloadbalancingv2.CreateListenerInput{
+		LoadBalancerArn: aws.String(loadBalancerARN),
+		Protocol:        elbTypes.ProtocolEnumHttp,
+		Port:            aws.Int32(80),
+		DefaultActions: []elbTypes.Action{
+			{
+				Type: elbTypes.ActionTypeEnumForward,
+				ForwardConfig: &elbTypes.ForwardActionConfig{
+					TargetGroups: []elbTypes.TargetGroupTuple{
+						{
+							TargetGroupArn: aws.String(targetGroupARN),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if _, err := elbClient.CreateListener(ctx, input); err != nil {
+		return fmt.Errorf("error creating listener: %w", err)
+	}
+
+	logger.Println("Listener created successfully")
+	return nil
 }
