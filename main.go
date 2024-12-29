@@ -20,18 +20,27 @@ import (
 )
 
 const (
-	ENV_FILE_PATH    = ".env"
-	USER_DATA_SCRIPT = "user_data.sh"
+	EnvFilePath    = ".env"
+	UserDataScript = "user_data.sh"
 
-	AWS_REGION                 = "us-east-1"
-	AWS_AMI_ID                 = "ami-01816d07b1128cd2d" // Amazon Linux 2023 AMI
-	AWS_LAUNCH_TEMPLATE_PREFIX = "webservice-launch-template-"
-	AWS_DEFAULT_EC2_COUNT      = 2
+	AWSRegion                   = "us-east-1"
+	AWSAmiID                    = "ami-01816d07b1128cd2d" // Amazon Linux 2023 AMI
+	AWSLaunchTemplatePrefix     = "webservice-launch-template-"
+	AWSSecurityGroupPrefix      = "webservice-sg-"
+	AWSSecurityGroupDescription = "Security group for port 8080 access"
+	AWSDefaultEC2Count          = 2
+)
+
+var (
+	AWSSubnetAvailabilityZones = map[string]string{
+		"10.0.1.0/24": "us-east-1a",
+		"10.0.2.0/24": "us-east-1b",
+	}
 )
 
 func main() {
 	logger := log.Default()
-	if err := godotenv.Load(ENV_FILE_PATH); err != nil {
+	if err := godotenv.Load(EnvFilePath); err != nil {
 		logger.Fatalf("Error loading .env file: %v", err)
 	}
 	logger.Println("Environment variables loaded successfully")
@@ -39,7 +48,7 @@ func main() {
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancelFunc()
 
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithDefaultRegion(AWS_REGION))
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithDefaultRegion(AWSRegion))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -52,7 +61,7 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	subnetID, err := CreateSubnet(ctx, logger, ec2Client, vpcID)
+	subnetIDs, err := CreateSubnets(ctx, logger, ec2Client, vpcID)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -67,12 +76,12 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	ec2Instances, err := CreateEC2Instances(ctx, logger, ec2Client, launchTemplateID, subnetID)
+	ec2Instances, err := CreateEC2Instances(ctx, logger, ec2Client, launchTemplateID, subnetIDs[0], securityGroupID)
 	if err != nil {
 		logger.Fatal(err)
 	}
 
-	_, err = CreateLoadBalancer(ctx, logger, elbClient, subnetID, securityGroupID)
+	loadBalancerARN, err := CreateLoadBalancer(ctx, logger, elbClient, subnetIDs, securityGroupID)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -86,7 +95,7 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	if err = CreateListener(ctx, logger, elbClient, targetGroupARN, vpcID); err != nil {
+	if err = CreateListener(ctx, logger, elbClient, loadBalancerARN, targetGroupARN); err != nil {
 		logger.Fatal(err)
 	}
 }
@@ -114,34 +123,39 @@ func CreateVPC(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client) (
 	return *result.Vpc.VpcId, nil
 }
 
-func CreateSubnet(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, vpcID string) (string, error) {
-	subnetResult, err := ec2Client.CreateSubnet(ctx, &ec2.CreateSubnetInput{
-		VpcId:     aws.String(vpcID),
-		CidrBlock: aws.String("10.0.1.0/24"),
-	})
-	if err != nil {
-		return "", fmt.Errorf("error creating subnet: %w", err)
-	}
-	logger.Printf("Subnet created with ID: %s", *subnetResult.Subnet.SubnetId)
+func CreateSubnets(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, vpcID string) ([]string, error) {
+	subnets := make([]string, 0, len(AWSSubnetAvailabilityZones))
 
-	if _, err = ec2Client.ModifySubnetAttribute(ctx, &ec2.ModifySubnetAttributeInput{
-		SubnetId:            subnetResult.Subnet.SubnetId,
-		MapPublicIpOnLaunch: &types.AttributeBooleanValue{Value: aws.Bool(true)},
-	}); err != nil {
-		return "", fmt.Errorf("error enabling auto-assign public IPv4: %w", err)
-	}
-	logger.Printf("Enabled auto-assign public IPv4 for subnet: %s", *subnetResult.Subnet.SubnetId)
+	for cirdBlock, availabilityZone := range AWSSubnetAvailabilityZones {
+		subnetResult, err := ec2Client.CreateSubnet(ctx, &ec2.CreateSubnetInput{
+			VpcId:            aws.String(vpcID),
+			CidrBlock:        aws.String(cirdBlock),
+			AvailabilityZone: aws.String(availabilityZone),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error creating subnet: %w", err)
+		}
+		logger.Printf("Subnet created with ID: %s", *subnetResult.Subnet.SubnetId)
 
-	return *subnetResult.Subnet.SubnetId, nil
+		if _, err = ec2Client.ModifySubnetAttribute(ctx, &ec2.ModifySubnetAttributeInput{
+			SubnetId:            subnetResult.Subnet.SubnetId,
+			MapPublicIpOnLaunch: &types.AttributeBooleanValue{Value: aws.Bool(true)},
+		}); err != nil {
+			return nil, fmt.Errorf("error enabling auto-assign public IPv4: %w", err)
+		}
+		logger.Printf("Enabled auto-assign public IPv4 for subnet: %s", *subnetResult.Subnet.SubnetId)
+
+		subnets = append(subnets, *subnetResult.Subnet.SubnetId)
+	}
+
+	return subnets, nil
 }
 
 func CreateSecurityGroup(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, vpcID string) (string, error) {
-	sgName := "webservice-sg-" + uuid.NewString()
-	sgDescription := "Security group for port 8080 access"
-
+	sgName := AWSSecurityGroupPrefix + uuid.NewString()
 	createOutput, err := ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
 		GroupName:   aws.String(sgName),
-		Description: aws.String(sgDescription),
+		Description: aws.String(AWSSecurityGroupDescription),
 		VpcId:       aws.String(vpcID),
 	})
 	if err != nil {
@@ -173,7 +187,7 @@ func CreateSecurityGroup(ctx context.Context, logger *log.Logger, ec2Client *ec2
 }
 
 func CreateLaunchTemplate(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, securityGroupID string) (string, error) {
-	userDataBytes, err := os.ReadFile(USER_DATA_SCRIPT)
+	userDataBytes, err := os.ReadFile(UserDataScript)
 	if err != nil {
 		return "", fmt.Errorf("error reading user_data.sh file: %w", err)
 	}
@@ -183,13 +197,13 @@ func CreateLaunchTemplate(ctx context.Context, logger *log.Logger, ec2Client *ec
 	ec2LaunchTemplate, err := ec2Client.CreateLaunchTemplate(ctx, &ec2.CreateLaunchTemplateInput{
 		LaunchTemplateData: &types.RequestLaunchTemplateData{
 			UserData:     aws.String(base64UserData),
-			ImageId:      aws.String(AWS_AMI_ID),
+			ImageId:      aws.String(AWSAmiID),
 			InstanceType: types.InstanceTypeT2Micro,
 			SecurityGroupIds: []string{
 				securityGroupID,
 			},
 		},
-		LaunchTemplateName: aws.String(AWS_LAUNCH_TEMPLATE_PREFIX + uuid.NewString()),
+		LaunchTemplateName: aws.String(AWSLaunchTemplatePrefix + uuid.NewString()),
 	})
 	if err != nil {
 		return "", fmt.Errorf("error creating launch template: %w", err)
@@ -199,14 +213,14 @@ func CreateLaunchTemplate(ctx context.Context, logger *log.Logger, ec2Client *ec
 	return *ec2LaunchTemplate.LaunchTemplate.LaunchTemplateId, nil
 }
 
-func CreateEC2Instances(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, launchTemplateID string, subnetID string) ([]types.Instance, error) {
+func CreateEC2Instances(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, launchTemplateID string, subnetID string, securityGroupID string) ([]types.Instance, error) {
 	input := &ec2.RunInstancesInput{
 		LaunchTemplate: &types.LaunchTemplateSpecification{
 			LaunchTemplateId: aws.String(launchTemplateID),
 			Version:          aws.String("$Latest"),
 		},
-		MinCount: aws.Int32(AWS_DEFAULT_EC2_COUNT),
-		MaxCount: aws.Int32(AWS_DEFAULT_EC2_COUNT),
+		MinCount: aws.Int32(AWSDefaultEC2Count),
+		MaxCount: aws.Int32(AWSDefaultEC2Count),
 		SubnetId: aws.String(subnetID),
 	}
 	result, err := ec2Client.RunInstances(ctx, input)
@@ -247,11 +261,11 @@ func WaitForInstances(ctx context.Context, client *ec2.Client, logger *log.Logge
 	return waiter.Wait(ctx, input, 5*time.Minute)
 }
 
-func CreateLoadBalancer(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, subnetID string, securityGroupID string) (string, error) {
+func CreateLoadBalancer(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, subnetIDs []string, securityGroupID string) (string, error) {
 	input := &elasticloadbalancingv2.CreateLoadBalancerInput{
 		Name:           aws.String("webservice-load-balancer"),
 		Scheme:         elbTypes.LoadBalancerSchemeEnumInternetFacing,
-		Subnets:        []string{subnetID},
+		Subnets:        subnetIDs,
 		SecurityGroups: []string{securityGroupID},
 		IpAddressType:  elbTypes.IpAddressTypeIpv4,
 		Type:           elbTypes.LoadBalancerTypeEnumApplication,
