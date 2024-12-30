@@ -103,6 +103,8 @@ func main() {
 	if err = CreateListener(ctx, logger, elbClient, loadBalancerARN, targetGroupARN); err != nil {
 		logger.Fatal(err)
 	}
+
+	logger.Println("All AWS resources created successfully")
 }
 
 func CreateVPC(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client) (string, error) {
