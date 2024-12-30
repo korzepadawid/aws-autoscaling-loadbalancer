@@ -216,8 +216,29 @@ func CreateSecurityGroup(ctx context.Context, logger *log.Logger, ec2Client *ec2
 					},
 				},
 			},
+			{
+				IpProtocol: aws.String("tcp"),
+				FromPort:   aws.Int32(80),
+				ToPort:     aws.Int32(80),
+				IpRanges: []types.IpRange{
+					{
+						CidrIp: aws.String("0.0.0.0/0"),
+					},
+				},
+			},
+			{
+				IpProtocol: aws.String("tcp"),
+				FromPort:   aws.Int32(443),
+				ToPort:     aws.Int32(443),
+				IpRanges: []types.IpRange{
+					{
+						CidrIp: aws.String("0.0.0.0/0"),
+					},
+				},
+			},
 		},
 	}
+
 	if _, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, ec2IngressInput); err != nil {
 		return "", fmt.Errorf("error adding inbound (ingress) rule for port 8080: %w", err)
 	}
