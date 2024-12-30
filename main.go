@@ -61,7 +61,12 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	subnetIDs, err := CreateSubnets(ctx, logger, ec2Client, vpcID)
+	internetGatewayID, err := CreateInternetGateway(ctx, logger, ec2Client, vpcID)
+	if err != nil {
+		logger.Fatal(err)
+	}
+
+	subnetIDs, err := CreateSubnets(ctx, logger, ec2Client, vpcID, internetGatewayID)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -78,10 +83,6 @@ func main() {
 
 	ec2Instances, err := CreateEC2Instances(ctx, logger, ec2Client, launchTemplateID, subnetIDs[0], securityGroupID)
 	if err != nil {
-		logger.Fatal(err)
-	}
-
-	if err := CreateInternetGateway(ctx, logger, ec2Client, vpcID); err != nil {
 		logger.Fatal(err)
 	}
 
@@ -127,29 +128,62 @@ func CreateVPC(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client) (
 	return *result.Vpc.VpcId, nil
 }
 
-func CreateSubnets(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, vpcID string) ([]string, error) {
+func CreateSubnets(
+	ctx context.Context,
+	logger *log.Logger,
+	ec2Client *ec2.Client,
+	vpcID string,
+	internetGatewayID string,
+) ([]string, error) {
 	subnets := make([]string, 0, len(AWSSubnetAvailabilityZones))
 
-	for cirdBlock, availabilityZone := range AWSSubnetAvailabilityZones {
+	routeTableResult, err := ec2Client.CreateRouteTable(ctx, &ec2.CreateRouteTableInput{
+		VpcId: aws.String(vpcID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error creating route table: %w", err)
+	}
+	routeTableID := *routeTableResult.RouteTable.RouteTableId
+	logger.Printf("Route table created with ID: %s", routeTableID)
+
+	if _, err = ec2Client.CreateRoute(ctx, &ec2.CreateRouteInput{
+		RouteTableId:         aws.String(routeTableID),
+		DestinationCidrBlock: aws.String("0.0.0.0/0"),
+		GatewayId:            aws.String(internetGatewayID),
+	}); err != nil {
+		return nil, fmt.Errorf("error creating route to internet gateway: %w", err)
+	}
+	logger.Printf("Created route to Internet Gateway %s in route table %s", internetGatewayID, routeTableID)
+
+	for cidrBlock, availabilityZone := range AWSSubnetAvailabilityZones {
 		subnetResult, err := ec2Client.CreateSubnet(ctx, &ec2.CreateSubnetInput{
 			VpcId:            aws.String(vpcID),
-			CidrBlock:        aws.String(cirdBlock),
+			CidrBlock:        aws.String(cidrBlock),
 			AvailabilityZone: aws.String(availabilityZone),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("error creating subnet: %w", err)
 		}
-		logger.Printf("Subnet created with ID: %s", *subnetResult.Subnet.SubnetId)
+		subnetID := *subnetResult.Subnet.SubnetId
+		logger.Printf("Subnet created with ID: %s", subnetID)
 
-		if _, err = ec2Client.ModifySubnetAttribute(ctx, &ec2.ModifySubnetAttributeInput{
-			SubnetId:            subnetResult.Subnet.SubnetId,
+		if _, err := ec2Client.ModifySubnetAttribute(ctx, &ec2.ModifySubnetAttributeInput{
+			SubnetId:            aws.String(subnetID),
 			MapPublicIpOnLaunch: &types.AttributeBooleanValue{Value: aws.Bool(true)},
 		}); err != nil {
 			return nil, fmt.Errorf("error enabling auto-assign public IPv4: %w", err)
 		}
-		logger.Printf("Enabled auto-assign public IPv4 for subnet: %s", *subnetResult.Subnet.SubnetId)
+		logger.Printf("Enabled auto-assign public IPv4 for subnet: %s", subnetID)
 
-		subnets = append(subnets, *subnetResult.Subnet.SubnetId)
+		if _, err = ec2Client.AssociateRouteTable(ctx, &ec2.AssociateRouteTableInput{
+			RouteTableId: aws.String(routeTableID),
+			SubnetId:     aws.String(subnetID),
+		}); err != nil {
+			return nil, fmt.Errorf("error associating route table: %w", err)
+		}
+		logger.Printf("Associated route table %s with subnet %s", routeTableID, subnetID)
+
+		subnets = append(subnets, subnetID)
 	}
 
 	return subnets, nil
@@ -265,10 +299,10 @@ func WaitForInstances(ctx context.Context, client *ec2.Client, logger *log.Logge
 	return waiter.Wait(ctx, input, 5*time.Minute)
 }
 
-func CreateInternetGateway(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, vpcID string) error {
+func CreateInternetGateway(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, vpcID string) (string, error) {
 	result, err := ec2Client.CreateInternetGateway(ctx, &ec2.CreateInternetGatewayInput{})
 	if err != nil {
-		return fmt.Errorf("error creating internet gateway: %w", err)
+		return "", fmt.Errorf("error creating internet gateway: %w", err)
 	}
 	logger.Printf("Internet gateway created with ID: %s", *result.InternetGateway.InternetGatewayId)
 
@@ -276,12 +310,12 @@ func CreateInternetGateway(ctx context.Context, logger *log.Logger, ec2Client *e
 		InternetGatewayId: result.InternetGateway.InternetGatewayId,
 		VpcId:             aws.String(vpcID),
 	}); err != nil {
-		return fmt.Errorf("error attaching internet gateway to VPC: %w", err)
+		return "", fmt.Errorf("error attaching internet gateway to VPC: %w", err)
 	}
 
 	logger.Printf("Internet gateway %s attached to VPC with ID: %s", *result.InternetGateway.InternetGatewayId, vpcID)
 
-	return nil
+	return *result.InternetGateway.InternetGatewayId, nil
 }
 
 func CreateLoadBalancer(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, subnetIDs []string, securityGroupID string) (string, error) {
