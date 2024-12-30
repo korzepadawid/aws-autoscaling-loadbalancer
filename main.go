@@ -81,6 +81,10 @@ func main() {
 		logger.Fatal(err)
 	}
 
+	if err := CreateInternetGateway(ctx, logger, ec2Client, vpcID); err != nil {
+		logger.Fatal(err)
+	}
+
 	loadBalancerARN, err := CreateLoadBalancer(ctx, logger, elbClient, subnetIDs, securityGroupID)
 	if err != nil {
 		logger.Fatal(err)
@@ -259,6 +263,25 @@ func WaitForInstances(ctx context.Context, client *ec2.Client, logger *log.Logge
 	logger.Println("Waiting for instances to be running...")
 	logger.Println("This may take a few minutes...")
 	return waiter.Wait(ctx, input, 5*time.Minute)
+}
+
+func CreateInternetGateway(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, vpcID string) error {
+	result, err := ec2Client.CreateInternetGateway(ctx, &ec2.CreateInternetGatewayInput{})
+	if err != nil {
+		return fmt.Errorf("error creating internet gateway: %w", err)
+	}
+	logger.Printf("Internet gateway created with ID: %s", *result.InternetGateway.InternetGatewayId)
+
+	if _, err = ec2Client.AttachInternetGateway(context.TODO(), &ec2.AttachInternetGatewayInput{
+		InternetGatewayId: result.InternetGateway.InternetGatewayId,
+		VpcId:             aws.String(vpcID),
+	}); err != nil {
+		return fmt.Errorf("error attaching internet gateway to VPC: %w", err)
+	}
+
+	logger.Printf("Internet gateway %s attached to VPC with ID: %s", *result.InternetGateway.InternetGatewayId, vpcID)
+
+	return nil
 }
 
 func CreateLoadBalancer(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, subnetIDs []string, securityGroupID string) (string, error) {
