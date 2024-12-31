@@ -100,7 +100,7 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	loadBalancerARN, err := CreateLoadBalancer(ctx, logger, elbClient, subnetIDs, securityGroupID)
+	loadBalancerARN, dnsName, err := CreateLoadBalancer(ctx, logger, elbClient, subnetIDs, securityGroupID)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -110,6 +110,8 @@ func main() {
 	}
 
 	logger.Println("All AWS resources created successfully")
+
+	logger.Printf("http://%s", dnsName)
 }
 
 func CreateVPC(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client) (string, error) {
@@ -298,7 +300,7 @@ func CreateInternetGateway(ctx context.Context, logger *log.Logger, ec2Client *e
 	return *result.InternetGateway.InternetGatewayId, nil
 }
 
-func CreateLoadBalancer(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, subnetIDs []string, securityGroupID string) (string, error) {
+func CreateLoadBalancer(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, subnetIDs []string, securityGroupID string) (string, string, error) {
 	input := &elasticloadbalancingv2.CreateLoadBalancerInput{
 		Name:           aws.String("webservice-load-balancer"),
 		Scheme:         elbTypes.LoadBalancerSchemeEnumInternetFacing,
@@ -310,13 +312,15 @@ func CreateLoadBalancer(ctx context.Context, logger *log.Logger, elbClient *elas
 
 	output, err := elbClient.CreateLoadBalancer(ctx, input)
 	if err != nil {
-		return "", fmt.Errorf("error creating load balancer: %w", err)
+		return "", "", fmt.Errorf("error creating load balancer: %w", err)
 	}
 
 	lbARN := *output.LoadBalancers[0].LoadBalancerArn
 	logger.Printf("Load balancer created with ARN: %s", lbARN)
+	dnsName := *output.LoadBalancers[0].DNSName
+	logger.Printf("Load balancer DNS name: %s", dnsName)
 
-	return lbARN, nil
+	return lbARN, dnsName, nil
 }
 
 func CreateTargetGroup(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, vpcID string) (string, error) {
