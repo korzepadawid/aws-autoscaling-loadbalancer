@@ -7,10 +7,10 @@ import logging
 logging.getLogger().setLevel(logging.INFO)
 
 
-API_URL="http://webservice-load-balancer-626763470.us-east-1.elb.amazonaws.com"
+API_URL="http://webservice-load-balancer-1390960582.us-east-1.elb.amazonaws.com"
 
 
-UNIT = 5.0 # secs
+UNIT = 30.0 # secs
 
 # Pre generated primes
 first_primes_list = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29,

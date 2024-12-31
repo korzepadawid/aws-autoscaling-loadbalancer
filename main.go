@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	autoscalingTypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
 	elbTypes "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
-
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -26,9 +28,16 @@ const (
 	AWSRegion                   = "us-east-1"
 	AWSAmiID                    = "ami-01816d07b1128cd2d" // Amazon Linux 2023 AMI
 	AWSLaunchTemplatePrefix     = "webservice-launch-template-"
+	AWSLaunchTemplateVersion    = "$Latest"
 	AWSSecurityGroupPrefix      = "webservice-sg-"
+	AWSAutoscalingGroupPrefix   = "webservice-sg-"
+	AWSAutoscalingPolicyPrefix  = "webservice-sg-"
 	AWSSecurityGroupDescription = "Security group for port 8080 access"
-	AWSDefaultEC2Count          = 2
+	AWSAutoscalingPolicyType    = "TargetTrackingScaling"
+	AWSMinEC2Count              = 2
+	AWSMaxEC2Count              = 5
+
+	AWSAutoScalingCPUThreshold = 30.0
 )
 
 var (
@@ -55,6 +64,7 @@ func main() {
 	logger.Println("AWS configuration loaded successfully")
 	ec2Client := ec2.NewFromConfig(cfg)
 	elbClient := elasticloadbalancingv2.NewFromConfig(cfg)
+	autoscalingClient := autoscaling.NewFromConfig(cfg)
 
 	vpcID, err := CreateVPC(ctx, logger, ec2Client)
 	if err != nil {
@@ -81,22 +91,17 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	ec2Instances, err := CreateEC2Instances(ctx, logger, ec2Client, launchTemplateID, subnetIDs[0], securityGroupID)
-	if err != nil {
-		logger.Fatal(err)
-	}
-
-	loadBalancerARN, err := CreateLoadBalancer(ctx, logger, elbClient, subnetIDs, securityGroupID)
-	if err != nil {
-		logger.Fatal(err)
-	}
-
 	targetGroupARN, err := CreateTargetGroup(ctx, logger, elbClient, vpcID)
 	if err != nil {
 		logger.Fatal(err)
 	}
 
-	if err = RegisterTargets(ctx, logger, elbClient, targetGroupARN, ec2Instances); err != nil {
+	if err := CreateAutoscalingGroup(ctx, logger, autoscalingClient, launchTemplateID, targetGroupARN, subnetIDs); err != nil {
+		logger.Fatal(err)
+	}
+
+	loadBalancerARN, err := CreateLoadBalancer(ctx, logger, elbClient, subnetIDs, securityGroupID)
+	if err != nil {
 		logger.Fatal(err)
 	}
 
@@ -274,54 +279,6 @@ func CreateLaunchTemplate(ctx context.Context, logger *log.Logger, ec2Client *ec
 	return *ec2LaunchTemplate.LaunchTemplate.LaunchTemplateId, nil
 }
 
-func CreateEC2Instances(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, launchTemplateID string, subnetID string, securityGroupID string) ([]types.Instance, error) {
-	input := &ec2.RunInstancesInput{
-		LaunchTemplate: &types.LaunchTemplateSpecification{
-			LaunchTemplateId: aws.String(launchTemplateID),
-			Version:          aws.String("$Latest"),
-		},
-		MinCount: aws.Int32(AWSDefaultEC2Count),
-		MaxCount: aws.Int32(AWSDefaultEC2Count),
-		SubnetId: aws.String(subnetID),
-	}
-	result, err := ec2Client.RunInstances(ctx, input)
-	if err != nil {
-		log.Fatalf("Unable to launch instance, %v", err)
-	}
-
-	for _, instance := range result.Instances {
-		logger.Printf("Launched instance with ID: %s", *instance.InstanceId)
-	}
-
-	err = WaitForInstances(ctx, ec2Client, logger, result.Instances)
-	if err != nil {
-		return nil, fmt.Errorf("error waiting for instances to be running: %w", err)
-	}
-
-	logger.Println("All instances are running")
-
-	return result.Instances, nil
-}
-
-func WaitForInstances(ctx context.Context, client *ec2.Client, logger *log.Logger, instances []types.Instance) error {
-	instanceIDs := make([]string, len(instances))
-	for i, instance := range instances {
-		instanceIDs[i] = *instance.InstanceId
-	}
-
-	input := &ec2.DescribeInstancesInput{
-		InstanceIds: instanceIDs,
-	}
-
-	waiter := ec2.NewInstanceRunningWaiter(client, func(irwo *ec2.InstanceRunningWaiterOptions) {
-		irwo.LogWaitAttempts = true
-	})
-
-	logger.Println("Waiting for instances to be running...")
-	logger.Println("This may take a few minutes...")
-	return waiter.Wait(ctx, input, 5*time.Minute)
-}
-
 func CreateInternetGateway(ctx context.Context, logger *log.Logger, ec2Client *ec2.Client, vpcID string) (string, error) {
 	result, err := ec2Client.CreateInternetGateway(ctx, &ec2.CreateInternetGatewayInput{})
 	if err != nil {
@@ -382,27 +339,6 @@ func CreateTargetGroup(ctx context.Context, logger *log.Logger, elbClient *elast
 	return tgARN, nil
 }
 
-func RegisterTargets(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, targetGroupARN string, instances []types.Instance) error {
-	targets := make([]elbTypes.TargetDescription, len(instances))
-	for i, instance := range instances {
-		targets[i] = elbTypes.TargetDescription{
-			Id: instance.InstanceId,
-		}
-	}
-
-	input := &elasticloadbalancingv2.RegisterTargetsInput{
-		TargetGroupArn: aws.String(targetGroupARN),
-		Targets:        targets,
-	}
-
-	if _, err := elbClient.RegisterTargets(ctx, input); err != nil {
-		return fmt.Errorf("error registering targets: %w", err)
-	}
-
-	logger.Println("Targets registered successfully")
-	return nil
-}
-
 func CreateListener(ctx context.Context, logger *log.Logger, elbClient *elasticloadbalancingv2.Client, loadBalancerARN, targetGroupARN string) error {
 	input := &elasticloadbalancingv2.CreateListenerInput{
 		LoadBalancerArn: aws.String(loadBalancerARN),
@@ -427,5 +363,43 @@ func CreateListener(ctx context.Context, logger *log.Logger, elbClient *elasticl
 	}
 
 	logger.Println("Listener created successfully")
+	return nil
+}
+
+func CreateAutoscalingGroup(ctx context.Context, logger *log.Logger, autoscalingClient *autoscaling.Client, launchTemplateID string, targetGroupARN string, subnetIDs []string) error {
+	autoscalingGroupName := AWSAutoscalingGroupPrefix + uuid.NewString()
+	if _, err := autoscalingClient.CreateAutoScalingGroup(ctx, &autoscaling.CreateAutoScalingGroupInput{
+		AutoScalingGroupName: aws.String(autoscalingGroupName),
+		LaunchTemplate: &autoscalingTypes.LaunchTemplateSpecification{
+			LaunchTemplateId: aws.String(launchTemplateID),
+			Version:          aws.String(AWSLaunchTemplateVersion),
+		},
+		MinSize: aws.Int32(AWSMinEC2Count),
+		MaxSize: aws.Int32(AWSMaxEC2Count),
+		TargetGroupARNs: []string{
+			targetGroupARN,
+		},
+		VPCZoneIdentifier: aws.String(strings.Join(subnetIDs, ",")),
+	}); err != nil {
+		return fmt.Errorf("error creating autoscaling group: %w", err)
+	}
+	logger.Printf("Autoscaling group created with name: %s", autoscalingGroupName)
+
+	policyInput := &autoscaling.PutScalingPolicyInput{
+		AutoScalingGroupName: aws.String(autoscalingGroupName),
+		PolicyName:           aws.String(AWSAutoscalingPolicyPrefix + uuid.NewString()),
+		PolicyType:           aws.String(AWSAutoscalingPolicyType),
+		TargetTrackingConfiguration: &autoscalingTypes.TargetTrackingConfiguration{
+			TargetValue: aws.Float64(AWSAutoScalingCPUThreshold),
+			PredefinedMetricSpecification: &autoscalingTypes.PredefinedMetricSpecification{
+				PredefinedMetricType: autoscalingTypes.MetricTypeASGAverageCPUUtilization,
+			},
+		},
+	}
+	if _, err := autoscalingClient.PutScalingPolicy(ctx, policyInput); err != nil {
+		return fmt.Errorf("error creating autoscaling policy: %w", err)
+	}
+	logger.Println("Autoscaling policy created successfully")
+
 	return nil
 }
